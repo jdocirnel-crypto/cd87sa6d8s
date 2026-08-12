@@ -91,7 +91,8 @@
   .card-footer .dina-btn { background: #2F2F2F; }
   .card-footer .sms-btn { background: #00897B; }
   .card-img {
-    position: relative; width: 96px; height: 120px; margin: 6px;
+    position: relative; width: 96px; height: auto; align-self: stretch;
+    margin: 6px;
     border-radius: 10px; border: 1.5px solid #EDEEEE; overflow: hidden; flex-shrink: 0;
     background: #37474F;
   }
@@ -707,7 +708,7 @@ function renderCard(p) {
     + '<div class="card-main">'
     + '<div class="card-img" style="border-color:' + bc + '">' + imgHtml
     + '<div class="img-banner img-user">' + esc(p.Usuario) + '</div>'
-    + '<div class="img-banner img-estado" style="' + (offline ? 'background:#B71C1C;font-weight:700' : '') + '">' + (offline ? 'OFFLINE' : esc(p.Estado)) + '</div>'
+    + '<div class="img-banner img-estado" style="' + (offline ? 'background:#B71C1C;font-weight:700' : '') + '">' + (offline ? 'OFFLINE' + (p.Estado ? '<br>' + esc(p.Estado) : '') : esc(p.Estado)) + '</div>'
     + '</div>'
     + '<div class="card-info">' + info + '</div>'
     + '<div class="card-actions">' + actions + '</div>'
