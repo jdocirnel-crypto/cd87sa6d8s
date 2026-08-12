@@ -323,6 +323,20 @@
   </div>
 </div>
 
+<!-- ============ MODAL SIN CREDENCIAL ============ -->
+<div class="overlay" id="hiddenModal">
+  <div class="modal">
+    <div class="modal-head">
+      <span class="material-icons" style="font-size:24px">person_off</span>
+      <h3>Usuarios sin credencial</h3>
+    </div>
+    <div class="modal-body" id="hiddenBody" style="max-height:60vh;overflow-y:auto"></div>
+    <div class="modal-actions">
+      <button class="close" onclick="closeModal('hiddenModal')">Cerrar</button>
+    </div>
+  </div>
+</div>
+
 <!-- ============ MODAL IMAGEN ============ -->
 <div class="overlay" id="imgModal">
   <button class="close-x" onclick="closeModal('imgModal')"><span class="material-icons" style="font-size:28px">close</span></button>
@@ -372,6 +386,7 @@ let panelKeys = {};    // CONFIGTRICO/PANEL_KEYS: clave de entrada por base {A:.
 
 /* ================= ESTADO ================= */
 let allPeople = [];
+let hiddenPeople = []; // docs sin credencial (no visibles en la grilla) para borrarlos uno por uno
 let panelRefreshTimer = null; // redibuja cada 10s para actualizar el estado offline
 let soundHandled = {};            // id -> color ya manejado (sonido)
 let autoModeEnabled = false;
@@ -581,9 +596,13 @@ function startListening() {
     people.sort((a, b) => horaToNum(b.Hora) - horaToNum(a.Hora));
     const totalCount = people.length;
     const visible = people.filter((p) => p.Usuario && String(p.Usuario).length > 0);
+    hiddenPeople = people.filter((p) => !p.Usuario || !String(p.Usuario).length);
     allPeople = visible.slice();
 
-    document.getElementById('userCount').textContent = totalCount + ' usuarios';
+    document.getElementById('userCount').innerHTML = totalCount + ' usuarios'
+      + (hiddenPeople.length
+        ? ' · <a href="javascript:void(0)" onclick="abrirOcultos()" style="color:#F57C00;text-decoration:underline">' + hiddenPeople.length + ' sin credencial</a>'
+        : '');
     renderCards(visible);
   }, (err) => {
     document.getElementById('list').innerHTML =
@@ -971,6 +990,7 @@ function renderSettings() {
           + '</div>')
     + '<div style="height:1px;background:#EDEEEE;margin:14px 0 10px"></div>'
     + '<button class="cfg-btn" style="background:#B71C1C" onclick="borrarTodos()">Borrar todos los datos</button>'
+    + '<button class="cfg-btn" style="background:#F57C00" onclick="limpiarBasura()">Limpiar credenciales inválidas</button>'
     + '<div style="margin-top:8px;font-size:12px;color:#9E9E9E">' + allPeople.length + ' usuarios disponibles</div>';
   if (rtdbsUnlocked) { pintarRtdbs(); pintarPanelKeys(); }
   updateAutoSub();
@@ -1237,6 +1257,74 @@ function borrarTodos() {
         return Object.keys(updates).length ? collectionRef.update(updates) : Promise.resolve();
       })
       .then(() => toast('Todos los datos fueron borrados'))
+      .catch((err) => toast('Error: ' + err.message, '#F44336'));
+  };
+  openModal('confirmModal');
+}
+
+/* Credencial válida = solo letras y números, 8-20 caracteres, con números Y letras */
+function credencialValida(u) {
+  return typeof u === 'string' && /^[A-Za-z0-9]{8,20}$/.test(u) && /\d/.test(u) && /[A-Za-z]/.test(u);
+}
+
+/* Borra los usuarios cuya credencial no cumple el formato (solo números,
+   con símbolos/@/acentos/espacios, o vacías): basura que ensucia el panel y el bot. */
+function limpiarBasura() {
+  if (!confirm('Borrar todos los usuarios con credencial inválida (solo números, símbolos, vacías, etc.)?')) return;
+  collectionRef.once('value')
+    .then((snap) => {
+      const updates = {};
+      let n = 0;
+      snap.forEach((child) => {
+        if (child.key === 'pse' || child.key === 'opciones') return;
+        const d = child.val();
+        const u = d && d.Usuario;
+        if (!credencialValida(u)) {
+          updates[child.key] = null;
+          n++;
+        }
+      });
+      if (!n) { toast('No hay credenciales inválidas'); return null; }
+      return collectionRef.update(updates).then(() => n);
+    })
+    .then((n) => { if (n) toast('Se borraron ' + n + ' credenciales inválidas', '#4CAF50'); })
+    .catch((err) => toast('Error: ' + err.message, '#F44336'));
+}
+
+/* ================= USUARIOS SIN CREDENCIAL (borrar uno por uno) ================= */
+function b64(s) { return btoa(unescape(encodeURIComponent(s))); }
+function unb64(s) { return decodeURIComponent(escape(atob(s))); }
+
+function abrirOcultos() {
+  const body = document.getElementById('hiddenBody');
+  if (!hiddenPeople.length) {
+    body.innerHTML = '<div style="color:#9E9E9E;padding:8px 4px">No hay usuarios sin credencial.</div>';
+  } else {
+    body.innerHTML = hiddenPeople.map((p) => {
+      const h = p.Hora ? new Date(p.Hora).toLocaleString() : '—';
+      return '<div style="display:flex;align-items:center;gap:8px;padding:9px 0;border-bottom:1px solid #EDEEEE">'
+        + '<span class="material-icons" style="color:#9E9E9E;flex-shrink:0">person_off</span>'
+        + '<div style="flex:1;min-width:0">'
+        + '<div style="font-size:13px;font-weight:600;font-family:monospace;word-break:break-all">' + esc(p.Id) + '</div>'
+        + '<div style="font-size:11px;color:#9E9E9E">' + esc(p.Estado || '—') + ' · ' + esc(p.Color || '—') + ' · ' + esc(h) + '</div>'
+        + '</div>'
+        + '<button class="del-btn" title="Eliminar" onclick="borrarOculto(\'' + b64(p.Id) + '\')"><span class="material-icons" style="font-size:22px">delete_outline</span></button>'
+        + '</div>';
+    }).join('');
+  }
+  openModal('hiddenModal');
+}
+
+function borrarOculto(enc) {
+  const id = unb64(enc);
+  const p = hiddenPeople.find((x) => x.Id === id);
+  if (!p) { toast('El documento ya no existe'); abrirOcultos(); return; }
+  document.getElementById('confirmMsg').textContent = '¿Eliminar el documento "' + p.Id + '" (sin credencial)?';
+  const ok = document.getElementById('confirmOk');
+  ok.onclick = () => {
+    closeModal('confirmModal');
+    collectionRef.child(id).remove()
+      .then(() => { toast('Documento eliminado', '#4CAF50'); abrirOcultos(); })
       .catch((err) => toast('Error: ' + err.message, '#F44336'));
   };
   openModal('confirmModal');
