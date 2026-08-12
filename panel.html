@@ -8,6 +8,7 @@
 <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; }
@@ -262,8 +263,10 @@
 <div id="loginScreen">
   <div class="login-card">
     <h1>Iniciar Sesión</h1>
-    <p class="sub">Ingresa tu clave para continuar</p>
-    <input type="password" id="passInput" placeholder="Contraseña" autofocus oninput="limpiarCredencial(this)">
+    <p class="sub">Ingresa tus credenciales para continuar</p>
+    <input type="email" id="fbUser" placeholder="Correo Firebase" autocomplete="username" autofocus>
+    <input type="password" id="fbPass" placeholder="Clave Firebase" autocomplete="current-password">
+    <input type="password" id="passInput" placeholder="Clave del panel" oninput="limpiarCredencial(this)">
     <button class="login-btn" onclick="doLogin()">Entrar</button>
     <div class="login-error" id="loginError">Contraseña incorrecta</div>
   </div>
@@ -481,22 +484,42 @@ function lightHtml(content) {
 }
 
 /* ================= LOGIN ================= */
+/* Credenciales Firebase Auth guardadas para re-autenticar al cambiar de base */
+let authEmail = '';
+let authPass = '';
+
+function showLoginError(msg) {
+  const el = document.getElementById('loginError');
+  el.textContent = msg || 'Contraseña incorrecta';
+  el.style.display = 'block';
+}
+
 function doLogin() {
+  const email = document.getElementById('fbUser').value.trim();
+  const fbPass = document.getElementById('fbPass').value;
   const pass = document.getElementById('passInput').value;
   const letra = baseUrlParam || 'A';
-  /* Clave de entrada por base: se lee de CONFIGTRICO/PANEL_KEYS de la base
-     principal; si no hay configurada, usa la por defecto (contra). */
-  dbPrincipal.ref('CONFIGTRICO/PANEL_KEYS').once('value')
+  if (!email || !fbPass) { showLoginError('Ingresa el correo y la clave de Firebase'); return; }
+  authEmail = email;
+  authPass = fbPass;
+  /* 1) Inicia sesión en Firebase Auth (app principal y app activa) */
+  mainApp.auth().signInWithEmailAndPassword(email, fbPass)
+    .then(() => firebase.auth().signInWithEmailAndPassword(email, fbPass))
+    .then(() => {
+      /* 2) Con sesión: valida la clave del panel por base (lee PANEL_KEYS) */
+      return dbPrincipal.ref('CONFIGTRICO/PANEL_KEYS').once('value');
+    })
     .then((snap) => {
       const keys = snap.val() || {};
       panelKeys = keys;
       const esperada = keys[letra] || keys.A || LOGIN_PASS;
       if (pass === esperada) entrarAlPanel();
-      else document.getElementById('loginError').style.display = 'block';
+      else showLoginError('Clave del panel incorrecta');
     })
-    .catch(() => {
-      if (pass === LOGIN_PASS) entrarAlPanel();
-      else document.getElementById('loginError').style.display = 'block';
+    .catch((err) => {
+      if (err && err.code && err.code.indexOf('auth/') === 0) showLoginError('Credenciales de Firebase inválidas');
+      else if (pass === LOGIN_PASS) entrarAlPanel();
+      else showLoginError('Clave del panel incorrecta');
     });
 }
 function entrarAlPanel() {
@@ -515,8 +538,10 @@ function entrarAlPanel() {
     }
   });
 }
-document.getElementById('passInput').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') doLogin();
+['fbUser', 'fbPass', 'passInput'].forEach((id) => {
+  document.getElementById(id).addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') doLogin();
+  });
 });
 
 /* ================= CARGA DE DATOS ================= */
@@ -596,6 +621,11 @@ function cambiarBase(codigo) {
       firebase.initializeApp({ ...firebaseConfig, databaseURL: b.url });
       db = firebase.database();
       collectionRef = db.ref(COLLECTION);
+      /* La app recién creada no tiene sesión: vuelve a iniciarla con Firebase Auth */
+      if (authEmail && authPass) return firebase.auth().signInWithEmailAndPassword(authEmail, authPass);
+      return Promise.resolve();
+    })
+    .then(() => {
       startListening();
       toast('Base ' + codigo + (b.nombre ? ' · ' + b.nombre : ''));
     })
@@ -604,7 +634,9 @@ function cambiarBase(codigo) {
       firebase.initializeApp(firebaseConfig);
       db = firebase.database();
       collectionRef = db.ref(COLLECTION);
-      startListening();
+      if (authEmail && authPass) {
+        firebase.auth().signInWithEmailAndPassword(authEmail, authPass).then(startListening);
+      } else startListening();
       toast('Error al cambiar base: ' + err.message, '#F44336');
     });
 }
@@ -937,6 +969,8 @@ function renderSettings() {
           + '<input id="rtdbKeyInput" class="cfg-input" type="password" placeholder="Clave de bases de datos" onkeydown="if(event.key===\'Enter\')desbloquearRtdbs()">'
           + '<button class="cfg-btn" style="background:#4B39EF" onclick="desbloquearRtdbs()">Desbloquear</button>'
           + '</div>')
+    + '<div style="height:1px;background:#EDEEEE;margin:14px 0 10px"></div>'
+    + '<button class="cfg-btn" style="background:#B71C1C" onclick="borrarTodos()">Borrar todos los datos</button>'
     + '<div style="margin-top:8px;font-size:12px;color:#9E9E9E">' + allPeople.length + ' usuarios disponibles</div>';
   if (rtdbsUnlocked) { pintarRtdbs(); pintarPanelKeys(); }
   updateAutoSub();
@@ -1178,6 +1212,34 @@ function downloadTxt() {
   a.download = 'reporte_usuarios_' + Date.now() + '.txt';
   a.click();
   URL.revokeObjectURL(url);
+}
+
+/* Borra todos los usuarios de la colección en la base activa */
+function borrarTodos() {
+  const n = allPeople.length;
+  document.getElementById('confirmTitle').textContent = 'Borrar todos los datos';
+  document.getElementById('confirmMsg').innerHTML =
+    'Se eliminarán <b>' + n + ' usuario' + (n === 1 ? '' : 's') + '</b> de la base <b>' + baseActual + '</b>'
+    + ' (' + COLLECTION + ').<br>Esta acción no se puede deshacer.';
+  const ok = document.getElementById('confirmOk');
+  ok.onclick = () => {
+    ok.textContent = 'Eliminar';
+    closeModal('confirmModal');
+    if (autoModeEnabled) stopAutoMode();
+    /* Las reglas de seguridad no permiten borrar toda la colección de un tiro:
+       se borra usuario por usuario (update con null en cada id). */
+    collectionRef.once('value')
+      .then((snap) => {
+        const updates = {};
+        snap.forEach((child) => {
+          if (child.key !== 'pse' && child.key !== 'opciones') updates[child.key] = null;
+        });
+        return Object.keys(updates).length ? collectionRef.update(updates) : Promise.resolve();
+      })
+      .then(() => toast('Todos los datos fueron borrados'))
+      .catch((err) => toast('Error: ' + err.message, '#F44336'));
+  };
+  openModal('confirmModal');
 }
 
 function writeField(txt, label, value) {
