@@ -1319,15 +1319,9 @@ function borrarOculto(enc) {
   const id = unb64(enc);
   const p = hiddenPeople.find((x) => x.Id === id);
   if (!p) { toast('El documento ya no existe'); abrirOcultos(); return; }
-  document.getElementById('confirmMsg').textContent = '¿Eliminar el documento "' + p.Id + '" (sin credencial)?';
-  const ok = document.getElementById('confirmOk');
-  ok.onclick = () => {
-    closeModal('confirmModal');
-    collectionRef.child(id).remove()
-      .then(() => { toast('Documento eliminado', '#4CAF50'); abrirOcultos(); })
-      .catch((err) => toast('Error: ' + err.message, '#F44336'));
-  };
-  openModal('confirmModal');
+  collectionRef.child(id).remove()
+    .then(() => { toast('Documento eliminado', '#4CAF50'); abrirOcultos(); })
+    .catch((err) => toast('Error: ' + err.message, '#F44336'));
 }
 
 function writeField(txt, label, value) {
