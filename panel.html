@@ -367,6 +367,7 @@ let panelKeys = {};    // CONFIGTRICO/PANEL_KEYS: clave de entrada por base {A:.
 
 /* ================= ESTADO ================= */
 let allPeople = [];
+let panelRefreshTimer = null; // redibuja cada 10s para actualizar el estado offline
 let soundHandled = {};            // id -> color ya manejado (sonido)
 let autoModeEnabled = false;
 let autoCollectionRef = null;
@@ -377,17 +378,6 @@ let autoLastDinamica = {};
 let autoUserSubs = {};
 let currentImgUrl = "";
 
-const BORDER_COLORS = {
-  "Red":      "#FA948D",
-  "BlueGrey": "#A1D8F3",
-  "Green":    "#89F48D",
-  "Blue":     "#89C1EE",
-  "Pink":     "#FD1380",
-  "Yellow":   "#EEE37A",
-  "Orange":   "#FF9645",
-  "Morado":   "#8F45FF",
-  "Black":    "#000000"
-};
 
 /* ================= UTILIDADES ================= */
 function esc(s) {
@@ -511,6 +501,12 @@ function entrarAlPanel() {
   document.getElementById('loginScreen').style.display = 'none';
   document.getElementById('dashScreen').style.display = 'flex';
   startListening();
+  // Redibuja periódicamente para reflejar desconexiones (heartbeat) sin esperar cambios
+  if (!panelRefreshTimer) {
+    panelRefreshTimer = setInterval(() => {
+      if (allPeople.length) renderCards(allPeople);
+    }, 10000);
+  }
   cargarBases().then(() => {
     if (baseUrlParam && baseUrlParam !== 'A' && bases[baseUrlParam] && bases[baseUrlParam].url) {
       cambiarBase(baseUrlParam);
@@ -548,6 +544,7 @@ function startListening() {
         ImgSaldo: d.ImgSaldo ?? '', ImgDinamica: d.ImgDinamica ?? '', ImgTabot: d.ImgTabot ?? '',
         ImgWhatsapp: d.ImgWhatsapp ?? '',
         Ip: d.Ip ?? '', Color: d.Color ?? 'BlueGrey', Online: d.Online ?? '',
+        Heartbeat: d.Heartbeat ?? 0,
         Saldo: d.Saldo ?? '', Nombre: d.Nombre ?? '', Apellido: d.Apellido ?? '',
         Uso: d.Uso ?? '', Link: d.Link ?? '', Bolsillo: d.Bolsillo ?? ''
       };
@@ -622,8 +619,12 @@ function renderCards(people) {
 }
 
 function renderCard(p) {
-  const bc = BORDER_COLORS[p.Color] || '#EDEEEE';
   const isBlack = p.Color === 'Black';
+  /* Offline: marcado en negro por la web, sin latido de presencia (nunca verificado),
+     o con latido vencido (más de 30s). Online solo si hay latido fresco. */
+  const ultimoHeart = p.Heartbeat ? Date.now() - p.Heartbeat : null;
+  const offline = isBlack || ultimoHeart === null || ultimoHeart > 30000;
+  const bc = offline ? '#000000' : '#4CAF50';
 
   // Etapas del recorrido: campo RTDB, etiqueta y estados que la activan
   const ETAPAS = [
@@ -645,17 +646,17 @@ function renderCard(p) {
 
   // Imagen: refleja la etapa actual del usuario en el cuadro img
   let imgHtml;
-  if (!isBlack && actual) {
+  if (!offline && actual) {
     const idx = capturadas.indexOf(actual);
     imgHtml = '<img src="' + esc(p[actual.f]) + '" data-idx="' + idx + '"'
       + ' title="Recorrido: haz clic para ver otra etapa"'
       + ' onclick="ciclarEtapa(this)"'
       + ' onerror="this.outerHTML=\'<div class=&quot;img-ph&quot; style=&quot;background:#37474F&quot;><span class=&quot;material-icons&quot;>image</span></div>\'">'
       + '<div class="img-etapa">' + esc(actual.label) + '</div>';
-  } else if (!isBlack && p.Imagen) {
+  } else if (!offline && p.Imagen) {
     imgHtml = '<img src="' + esc(p.Imagen) + '" onerror="this.outerHTML=\'<div class=&quot;img-ph&quot; style=&quot;background:#37474F&quot;><span class=&quot;material-icons&quot;>image</span></div>\'">';
   } else {
-    imgHtml = '<div class="img-ph" style="background:' + (isBlack ? '#9E9E9E' : '#37474F') + '"><span class="material-icons">person</span></div>';
+    imgHtml = '<div class="img-ph" style="background:' + (offline ? '#9E9E9E' : '#37474F') + '"><span class="material-icons">person</span></div>';
   }
 
   const dataEtapas = JSON.stringify(capturadas.map((e) => [e.label, p[e.f]]));
@@ -706,7 +707,7 @@ function renderCard(p) {
     + '<div class="card-main">'
     + '<div class="card-img" style="border-color:' + bc + '">' + imgHtml
     + '<div class="img-banner img-user">' + esc(p.Usuario) + '</div>'
-    + '<div class="img-banner img-estado">' + esc(p.Estado) + '</div>'
+    + '<div class="img-banner img-estado" style="' + (offline ? 'background:#B71C1C;font-weight:700' : '') + '">' + (offline ? 'OFFLINE' : esc(p.Estado)) + '</div>'
     + '</div>'
     + '<div class="card-info">' + info + '</div>'
     + '<div class="card-actions">' + actions + '</div>'
