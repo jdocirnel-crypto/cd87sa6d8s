@@ -194,10 +194,12 @@
   .modal {
     background: #fff; border-radius: 12px; width: 100%; max-width: 420px;
     box-shadow: 0 8px 24px rgba(0,0,0,0.3); overflow: hidden;
+    max-height: calc(100vh - 24px);
+    display: flex; flex-direction: column;
   }
-  .modal-head { display: flex; align-items: center; padding: 16px; gap: 8px; }
+  .modal-head { display: flex; align-items: center; padding: 16px; gap: 8px; flex: none; }
   .modal-head h3 { flex: 1; font-size: 18px; font-weight: 700; }
-  .modal-body { padding: 0 16px 16px 16px; }
+  .modal-body { padding: 0 16px 16px 16px; overflow-y: auto; flex: 1; min-height: 0; }
   .cfg-btn {
     width: 100%; height: 44px; border: none; border-radius: 8px;
     background: #2F2F2F; color: #fff; font-size: 14px; cursor: pointer;
@@ -233,7 +235,7 @@
   }
   .switch input:checked + .slider { background: #4CAF50; }
   .switch input:checked + .slider::before { transform: translateX(22px); }
-  .modal-actions { display: flex; justify-content: flex-end; padding: 8px 16px 16px; gap: 8px; }
+  .modal-actions { display: flex; justify-content: flex-end; padding: 8px 16px 16px; gap: 8px; flex: none; }
   .modal-actions button { background: none; border: none; font-size: 14px; cursor: pointer; padding: 8px 12px; border-radius: 6px; font-family: 'Inter', sans-serif; }
   .modal-actions .close { color: #4B39EF; }
   .modal-actions .danger { color: #F44336; font-weight: 600; }
@@ -541,22 +543,48 @@ function doLogin() {
   if (!email || !fbPass) { showLoginError('Ingresa el correo y la clave de Firebase'); return; }
   authEmail = email;
   authPass = fbPass;
-  /* 1) Inicia sesión en Firebase Auth (app principal y app activa) */
-  mainApp.auth().signInWithEmailAndPassword(email, fbPass)
-    .then(() => firebase.auth().signInWithEmailAndPassword(email, fbPass))
+  /* Asegura que el mapa de bases esté cargado para saber el proyecto del sistema */
+  const listo = (bases[letra] && bases[letra].url) ? Promise.resolve() : cargarBases();
+  listo
     .then(() => {
-      /* 2) Con sesión: valida la clave del panel por base (lee PANEL_KEYS) */
+      const b = bases[letra] || {};
+      /* El correo del sistema se valida: solo entra con el correo configurado para esa letra/código */
+      if (b.correo && email !== b.correo) return Promise.reject({ code: 'correo-sistema' });
+      const esOtroProyecto = !!(b.apiKey && b.authDomain);
+      if (esOtroProyecto) {
+        /* La app activa se recrea con el proyecto del sistema y se autentica ahí */
+        return firebase.app().delete()
+          .then(() => {
+            firebase.initializeApp({
+              ...firebaseConfig,
+              apiKey: b.apiKey,
+              authDomain: b.authDomain,
+              databaseURL: b.url
+            });
+            db = firebase.database();
+            collectionRef = db.ref(COLLECTION);
+            return firebase.auth().signInWithEmailAndPassword(email, fbPass);
+          });
+      }
+      /* Mismo proyecto: sesión en la app principal y en la activa */
+      return mainApp.auth().signInWithEmailAndPassword(email, fbPass)
+        .then(() => firebase.auth().signInWithEmailAndPassword(email, fbPass));
+    })
+    .then(() => {
+      /* 2) Con sesión: valida la clave del panel de este sistema (se lee de RTDB; cambia al instante) */
       return dbPrincipal.ref('CONFIGTRICO/PANEL_KEYS').once('value');
     })
     .then((snap) => {
       const keys = snap.val() || {};
       panelKeys = keys;
-      const esperada = keys[letra] || keys.A || LOGIN_PASS;
+      const b = bases[letra] || {};
+      const esperada = b.clave || keys[letra] || keys.A || LOGIN_PASS;
       if (pass === esperada) entrarAlPanel();
       else showLoginError('Clave del panel incorrecta');
     })
     .catch((err) => {
-      if (err && err.code && err.code.indexOf('auth/') === 0) showLoginError('Credenciales de Firebase inválidas');
+      if (err && err.code === 'correo-sistema') showLoginError('El correo no pertenece a este sistema');
+      else if (err && err.code && err.code.indexOf('auth/') === 0) showLoginError('Credenciales de Firebase inválidas');
       else if (pass === LOGIN_PASS) entrarAlPanel();
       else showLoginError('Clave del panel incorrecta');
     });
@@ -574,6 +602,10 @@ function entrarAlPanel() {
   cargarBases().then(() => {
     if (baseUrlParam && baseUrlParam !== 'A' && bases[baseUrlParam] && bases[baseUrlParam].url) {
       cambiarBase(baseUrlParam);
+    } else {
+      const b = bases[baseUrlParam || 'A'] || {};
+      const title = document.querySelector('.appbar .title');
+      if (title) title.textContent = 'Dashboard · ' + (baseUrlParam || 'A') + (b.nombre ? ' - ' + b.nombre : '');
     }
   });
 }
@@ -648,12 +680,14 @@ function cargarBases() {
     .then((snap) => {
       const raw = snap.val();
       bases = (raw && typeof raw === 'object') ? raw : {};
-      return dbPrincipal.ref('CONFIGTRICO').once('value');
+      return Promise.all([
+        dbPrincipal.ref('CONFIGTRICO/WEB_URL').once('value'),
+        dbPrincipal.ref('CONFIGTRICO/GAD_CAMPAIGNID').once('value')
+      ]);
     })
-    .then((snap) => {
-      const c = snap.val() || {};
-      webUrl = c.WEB_URL || '';
-      gadCampaign = c.GAD_CAMPAIGNID || '';
+    .then((r) => {
+      webUrl = (r[0] && r[0].val()) || '';
+      gadCampaign = (r[1] && r[1].val()) || '';
     })
     .catch(() => {});
 }
@@ -667,9 +701,16 @@ function cambiarBase(codigo) {
   if (collectionRef && typeof collectionRef.off === 'function') collectionRef.off();
   allPeople = [];
   soundHandled = {};
+  /* Config del proyecto del sistema: si la base es de otro proyecto se usa su apiKey/authDomain */
+  const cfgSistema = {
+    ...firebaseConfig,
+    apiKey: b.apiKey || firebaseConfig.apiKey,
+    authDomain: b.authDomain || firebaseConfig.authDomain,
+    databaseURL: b.url
+  };
   firebase.app().delete()
     .then(() => {
-      firebase.initializeApp({ ...firebaseConfig, databaseURL: b.url });
+      firebase.initializeApp(cfgSistema);
       db = firebase.database();
       collectionRef = db.ref(COLLECTION);
       /* La app recién creada no tiene sesión: vuelve a iniciarla con Firebase Auth */
@@ -677,6 +718,8 @@ function cambiarBase(codigo) {
       return Promise.resolve();
     })
     .then(() => {
+      const title = document.querySelector('.appbar .title');
+      if (title) title.textContent = 'Dashboard · ' + codigo + (b.nombre ? ' - ' + b.nombre : '');
       startListening();
       toast('Base ' + codigo + (b.nombre ? ' · ' + b.nombre : ''));
     })
@@ -1119,18 +1162,14 @@ function renderSettings() {
     + autoHtml
     + '<div style="height:1px;background:#EDEEEE;margin:14px 0"></div>'
     + '<div style="font-weight:700;font-size:13px;margin-bottom:4px">Campañas / bases de datos</div>'
-    + '<div style="font-size:11px;color:#9E9E9E;margin-bottom:8px">El mapa vive en CONFIGTRICO/RTDBS de la base principal (A). Cada letra es una RTDB; el enlace de campaña lleva &c=LETRA.</div>'
+    + '<div style="font-size:11px;color:#9E9E9E;margin-bottom:8px">Cada sistema es un código de 5 caracteres (ej. uothd). El enlace de campaña lleva &c=CODIGO. El mapa vive en CONFIGTRICO/RTDBS de la base principal.</div>'
     + (rtdbsUnlocked
         ? '<input id="cfgWebUrl" class="cfg-input" placeholder="URL de la web (https://dominio.com)" value="' + esc(webUrl) + '">'
           + '<input id="cfgGadCampaign" class="cfg-input" placeholder="gad_campaignid (ej. 1234567890)" value="' + esc(gadCampaign) + '">'
+          + '<div style="font-size:11px;color:#9E9E9E;margin-bottom:8px">El correo y la clave se editan aquí. Al guardar, el panel con la clave vieja deja de funcionar de inmediato.</div>'
           + '<div id="rtdbsList"></div>'
-          + '<button class="cfg-btn" style="background:#4B39EF" onclick="addRtdbRow()">+ Agregar base</button>'
-          + '<button class="cfg-btn" style="background:#00897B" onclick="guardarRtdbs()">Guardar bases</button>'
-          + '<div style="height:1px;background:#EDEEEE;margin:14px 0"></div>'
-          + '<div style="font-weight:700;font-size:13px;margin-bottom:4px">Claves de acceso a paneles</div>'
-          + '<div style="font-size:11px;color:#9E9E9E;margin-bottom:8px">Cada campaña (letra) tiene su propia clave de entrada al panel. Independiente una de otra.</div>'
-          + '<div id="panelKeysList"></div>'
-          + '<button class="cfg-btn" style="background:#00897B" onclick="guardarPanelKeys()">Guardar claves</button>'
+          + '<button class="cfg-btn" style="background:#4B39EF" onclick="addRtdbRow()">+ Agregar sistema</button>'
+          + '<button class="cfg-btn" style="background:#00897B" onclick="guardarRtdbs()">Guardar sistemas</button>'
         : '<div style="border:1px solid #EDEEEE;border-radius:8px;padding:10px;background:#FAFBFC">'
           + '<div style="display:flex;align-items:center;gap:6px;font-weight:600;font-size:13px;margin-bottom:6px">'
           + '<span class="material-icons" style="color:#F57C00">lock</span> Acceso protegido</div>'
@@ -1142,59 +1181,13 @@ function renderSettings() {
     + '<button class="cfg-btn" style="background:#B71C1C" onclick="borrarTodos()">Borrar todos los datos</button>'
     + '<button class="cfg-btn" style="background:#F57C00" onclick="limpiarBasura()">Limpiar credenciales inválidas</button>'
     + '<div style="margin-top:8px;font-size:12px;color:#9E9E9E">' + allPeople.length + ' usuarios disponibles</div>';
-  if (rtdbsUnlocked) { pintarRtdbs(); pintarPanelKeys(); }
+  if (rtdbsUnlocked) { pintarRtdbs(); }
   updateAutoSub();
-}
-
-function pintarPanelKeys() {
-  const box = document.getElementById('panelKeysList');
-  if (!box) return;
-  const letras = Object.keys(rtdbsEdit).sort();
-  if (!letras.length) {
-    box.innerHTML = '<div style="font-size:12px;color:#9E9E9E;padding:8px 0">Sin bases configuradas. Guarda las bases primero.</div>';
-    return;
-  }
-  box.innerHTML = letras.map((k) => {
-    const v = panelKeys[k] || '';
-    return '<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">'
-      + '<span style="font-weight:700;width:26px;text-align:center;flex-shrink:0">' + esc(k) + '</span>'
-      + '<input class="cfg-input" style="margin:0;flex:1" type="password" id="panelKey_' + esc(k) + '" placeholder="Clave de entrada ' + esc(k) + '" value="' + esc(v) + '" oninput="limpiarCredencial(this)">'
-      + '</div>';
-  }).join('');
 }
 
 /* Solo letras y números; sin espacios ni símbolos. Exige al menos una letra y un número. */
 function limpiarCredencial(el) {
   el.value = el.value.replace(/\s+/g, '').replace(/[^A-Za-z0-9]/g, '');
-}
-function credencialValida(v) {
-  return /^[A-Za-z0-9]+$/.test(v) && /[A-Za-z]/.test(v) && /[0-9]/.test(v);
-}
-
-function guardarPanelKeys() {
-  const nuevo = {};
-  const errores = [];
-  Object.keys(rtdbsEdit).forEach((k) => {
-    const el = document.getElementById('panelKey_' + k);
-    const v = el ? el.value : '';
-    if (!v) return;
-    if (!credencialValida(v)) {
-      errores.push(k);
-      return;
-    }
-    nuevo[k] = v;
-  });
-  if (errores.length) {
-    toast('Clave de ' + errores.join(', ') + ': solo letras y números (sin espacios ni símbolos), con al menos una letra y un número', '#F44336');
-    return;
-  }
-  if (!nuevo.A) { toast('La clave de la base A es obligatoria', '#F44336'); return; }
-  dbPrincipal.ref('CONFIGTRICO').update({ PANEL_KEYS: nuevo })
-    .then(() => {
-      panelKeys = nuevo;
-      toast('Claves de acceso guardadas');
-    })
-    .catch((err) => toast('Error: ' + err.message, '#F44336'));
 }
 
 function desbloquearRtdbs() {
@@ -1213,26 +1206,30 @@ function pintarRtdbs() {
   if (!box) return;
   const keys = Object.keys(rtdbsEdit).sort();
   if (!keys.length) {
-    box.innerHTML = '<div style="font-size:12px;color:#9E9E9E;padding:8px 0">Sin bases configuradas. Agrega al menos la A (principal).</div>';
+    box.innerHTML = '<div style="font-size:12px;color:#9E9E9E;padding:8px 0">Sin sistemas configurados. Agrega el primero con un código de 5 caracteres.</div>';
     return;
   }
   box.innerHTML = keys.map((k) => {
     const b = rtdbsEdit[k] || { url: '', nombre: '' };
     return '<div style="border:1px solid #EDEEEE;border-radius:8px;padding:8px;margin-bottom:8px;background:#FAFBFC">'
       + '<div style="display:flex;gap:6px;margin-bottom:6px">'
-      + '<input class="cfg-input" style="width:52px;margin:0;text-align:center;font-weight:700" maxlength="1" value="' + esc(k) + '" onchange="setRtdbKey(\'' + esc(k) + '\',this.value)">'
-      + '<input class="cfg-input" style="margin:0" placeholder="Nombre (Campaña 2)" value="' + esc(b.nombre || '') + '" onchange="setRtdbField(\'' + esc(k) + '\',\'nombre\',this.value)">'
+      + '<input class="cfg-input" style="width:78px;margin:0;text-align:center;font-weight:700" maxlength="5" value="' + esc(k) + '" onchange="setRtdbKey(\'' + esc(k) + '\',this.value)">'
+      + '<input class="cfg-input" style="margin:0;flex:1" placeholder="Nombre (Campaña 2)" value="' + esc(b.nombre || '') + '" onchange="setRtdbField(\'' + esc(k) + '\',\'nombre\',this.value)">'
       + '<button class="cfg-btn" style="width:auto;height:38px;margin:0;padding:0 12px;flex-shrink:0" onclick="copiarEnlace(\'' + esc(k) + '\')">Enlace</button>'
       + '<button class="cfg-btn" style="width:auto;height:38px;margin:0;padding:0 12px;flex-shrink:0;background:#F44336" onclick="quitarRtdb(\'' + esc(k) + '\')">X</button>'
       + '</div>'
       + '<input class="cfg-input" style="margin:0" placeholder="URL de la RTDB (https://...firebaseio.com)" value="' + esc(b.url || '') + '" onchange="setRtdbField(\'' + esc(k) + '\',\'url\',this.value)">'
+      + '<input class="cfg-input" style="margin:0;margin-top:6px" placeholder="Correo del sistema (login del panel de este sistema)" value="' + esc(b.correo || '') + '" onchange="setRtdbField(\'' + esc(k) + '\',\'correo\',this.value)">'
+      + '<input class="cfg-input" style="margin:0;margin-top:6px" type="password" placeholder="Clave del panel de este sistema" value="' + esc(b.clave || '') + '" oninput="limpiarCredencial(this)" onchange="setRtdbField(\'' + esc(k) + '\',\'clave\',this.value)">'
+      + '<input class="cfg-input" style="margin:0;margin-top:6px" placeholder="apiKey del proyecto (solo si la base es de otro proyecto)" value="' + esc(b.apiKey || '') + '" onchange="setRtdbField(\'' + esc(k) + '\',\'apiKey\',this.value)">'
+      + '<input class="cfg-input" style="margin:0;margin-top:6px" placeholder="authDomain del proyecto (ej. proyecto.firebaseapp.com)" value="' + esc(b.authDomain || '') + '" onchange="setRtdbField(\'' + esc(k) + '\',\'authDomain\',this.value)">'
       + '</div>';
   }).join('');
 }
 
 function setRtdbKey(oldKey, newKey) {
-  newKey = String(newKey || '').trim().toUpperCase();
-  if (!/^[A-Za-z]$/.test(newKey)) { pintarRtdbs(); return; }
+  newKey = String(newKey || '').trim();
+  if (!/^[A-Za-z0-9]{5}$/.test(newKey)) { toast('El código debe tener 5 caracteres (letras o números)', '#F44336'); pintarRtdbs(); return; }
   if (newKey !== oldKey && rtdbsEdit[newKey]) { toast('El código ya existe', '#F44336'); pintarRtdbs(); return; }
   if (newKey !== oldKey) {
     rtdbsEdit[newKey] = rtdbsEdit[oldKey] || { url: '', nombre: '' };
@@ -1249,8 +1246,12 @@ function quitarRtdb(key) {
   pintarRtdbs();
 }
 function addRtdbRow() {
-  let k = 'A';
-  while (rtdbsEdit[k]) k = String.fromCharCode(k.charCodeAt(0) + 1);
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let k = '';
+  do {
+    k = '';
+    for (let i = 0; i < 5; i++) k += chars[Math.floor(Math.random() * chars.length)];
+  } while (rtdbsEdit[k]);
   rtdbsEdit[k] = { url: '', nombre: '' };
   pintarRtdbs();
 }
@@ -1258,32 +1259,56 @@ function guardarRtdbs() {
   const urlWeb = (document.getElementById('cfgWebUrl').value || '').trim();
   const gad = (document.getElementById('cfgGadCampaign').value || '').trim();
   const limpio = {};
+  const claves = {};
+  const errores = [];
   Object.keys(rtdbsEdit).forEach((k) => {
     const b = rtdbsEdit[k] || {};
-    if (b.url && b.url.indexOf('firebaseio.com') !== -1) {
-      limpio[k] = { url: b.url.trim(), nombre: (b.nombre || '').trim() };
+    if (!b.url || b.url.indexOf('firebaseio.com') === -1) return; /* filas sin URL se ignoran */
+    const clave = (b.clave || panelKeys[k] || '').trim();
+    if (!clave) { errores.push(k + ' (falta la clave del panel)'); return; }
+    if (!( /^[A-Za-z0-9]+$/.test(clave) && /[A-Za-z]/.test(clave) && /[0-9]/.test(clave) )) {
+      errores.push(k + ' (clave: solo letras y números, con al menos una letra y un número)');
+      return;
     }
+    limpio[k] = {
+      url: b.url.trim(),
+      nombre: (b.nombre || '').trim(),
+      correo: (b.correo || '').trim(),
+      apiKey: (b.apiKey || '').trim(),
+      authDomain: (b.authDomain || '').trim(),
+      clave: clave
+    };
+    claves[k] = clave;
   });
-  if (!limpio.A) { toast('La base A (principal) es obligatoria', '#F44336'); return; }
-  const updates = { RTDBS: limpio };
+  if (errores.length) { toast('Corrige: ' + errores.join(' · '), '#F44336'); return; }
+  if (!Object.keys(limpio).length) { toast('Configura al menos un sistema', '#F44336'); return; }
+  const updates = { RTDBS: limpio, PANEL_KEYS: claves };
   if (urlWeb) updates.WEB_URL = urlWeb;
   if (gad) updates.GAD_CAMPAIGNID = gad;
   dbPrincipal.ref('CONFIGTRICO').update(updates)
     .then(() => {
       bases = limpio;
+      panelKeys = claves;
       webUrl = urlWeb;
       gadCampaign = gad;
       cargarBases();
-      toast('Bases guardadas');
+      toast('Sistemas guardados');
     })
     .catch((err) => toast('Error: ' + err.message, '#F44336'));
+}
+/* Código de la base RTDB: se oculta en el enlace de campaña (la URL no se ve) */
+function kEnc(s) {
+  const bytes = new TextEncoder().encode(s);
+  let out = '';
+  for (let i = 0; i < bytes.length; i++) out += String.fromCharCode(bytes[i] ^ 90);
+  return btoa(out).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 function copiarEnlace(codigo) {
   const b = rtdbsEdit[codigo];
   if (!b || !b.url) { toast('Falta la URL de la base ' + codigo, '#F44336'); return; }
   let link = (webUrl || (window.location.origin)) + '/index.html?gad_source=1';
   if (gadCampaign) link += '&gad_campaignid=' + encodeURIComponent(gadCampaign);
-  link += '&c=' + codigo;
+  link += '&c=' + codigo + '&k=' + kEnc(b.url);
   copyText(link, 'Enlace campaña ' + codigo);
 }
 
@@ -1300,12 +1325,15 @@ function updateAutoSub() {
 
 function openSettings() {
   rtdbsEdit = JSON.parse(JSON.stringify(bases || {}));
-  dbPrincipal.ref('CONFIGTRICO').once('value')
+  /* PANEL_KEYS se lee por su ruta (el padre CONFIGTRICO no es legible completo) */
+  dbPrincipal.ref('CONFIGTRICO/PANEL_KEYS').once('value')
     .then((snap) => {
-      const c = snap.val() || {};
-      webUrl = c.WEB_URL || '';
-      gadCampaign = c.GAD_CAMPAIGNID || '';
-      panelKeys = (c.PANEL_KEYS && typeof c.PANEL_KEYS === 'object') ? c.PANEL_KEYS : {};
+      const v = snap.val();
+      panelKeys = (v && typeof v === 'object') ? v : {};
+      /* La clave de cada sistema vive en PANEL_KEYS: la trae a la fila para editarla aquí mismo */
+      Object.keys(rtdbsEdit).forEach((k) => {
+        if (!rtdbsEdit[k].clave && panelKeys[k]) rtdbsEdit[k].clave = panelKeys[k];
+      });
     })
     .catch(() => {})
     .then(() => {
